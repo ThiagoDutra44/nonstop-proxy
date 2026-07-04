@@ -98,11 +98,108 @@ async function nonstop(path, { method = "GET", body, cacheTtl = 0 } = {}) {
   return data;
 }
 
+// ===========================================================================
+// CURADORIA PREMIER — critério de posicionamento do site
+// Só entram imóveis à VENDA, em bairros nobres selecionados, a partir de R$ 1mi.
+// ===========================================================================
+const PREMIER_MIN_SALE = 1_000_000;
+
+// 18 bairros nobres de São Paulo (o "andar de cima" do mercado)
+const PREMIER_BAIRROS = [
+  "Jardim América",
+  "Jardim Europa",
+  "Jardim Paulista",
+  "Jardim Paulistano",
+  "Moema",
+  "Vila Nova Conceição",
+  "Itaim Bibi",
+  "Vila Olímpia",
+  "Cerqueira César",
+  "Pinheiros",
+  "Alto de Pinheiros",
+  "Brooklin",
+  "Campo Belo",
+  "Cidade Jardim",
+  "Perdizes",
+  "Paraíso",
+  "Vila Mariana",
+  "Vila Madalena",
+];
+
+// Normaliza: sem acento, minúsculo, sem espaços extras.
+// Faz "Vila Olímpia" == "VILA OLIMPIA" == "vila  olimpia".
+function normalize(str) {
+  return (str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+const PREMIER_BAIRROS_NORM = new Set(PREMIER_BAIRROS.map(normalize));
+
+// Um imóvel passa na curadoria Premier?
+function isPremier(imovel) {
+  const bairro = normalize(imovel?.address?.area);
+  if (!PREMIER_BAIRROS_NORM.has(bairro)) return false; // bairro fora da lista
+  const sale = Number(imovel?.values?.sale);
+  if (!sale || sale < PREMIER_MIN_SALE) return false; // sem venda ou abaixo de 1mi
+  return true;
+}
+
+// Remove dados sensíveis dos corretores/brokerage antes de servir ao front.
+// O site nunca deve expor email, telefone, WhatsApp, Stripe etc.
+function sanitize(imovel) {
+  if (!imovel || typeof imovel !== "object") return imovel;
+  const clean = { ...imovel };
+  delete clean.user;        // dados do corretor
+  delete clean.brokerage;   // dados de assinatura/pagamento
+  delete clean.network;
+  return clean;
+}
+
 // ---------------------------------------------------------------------------
 // Healthcheck
 // ---------------------------------------------------------------------------
 app.get("/", (_req, res) => res.json({ status: "online", service: "nonstop-proxy" }));
 app.get("/status", (_req, res) => res.json({ status: "online", slug: SLUG || null }));
+
+// ---------------------------------------------------------------------------
+// PREMIER — o acervo curado do site (bairros nobres, venda ≥ R$ 1mi)
+// Puxa o acervo do site no NonStop e aplica o filtro de posicionamento.
+// ---------------------------------------------------------------------------
+app.get("/api/premier", async (req, res) => {
+  try {
+    // Busca uma boa quantidade pra ter margem antes de filtrar.
+    const perPage = Number(req.query.perPage) || 100;
+    const currentPage = Number(req.query.currentPage) || 1;
+    const q = new URLSearchParams({
+      availableFor: "VENDA",
+      currentPage,
+      perPage,
+      sortBy: "sale",
+      sortOrder: -1, // mais caros primeiro
+      search: "",
+    }).toString();
+
+    const raw = await nonstop(`/imoveis/todos?${q}`, { cacheTtl: 5 * 60 * 1000 });
+
+    // A resposta pode vir como array direto ou dentro de um campo (data/imoveis/results).
+    const lista = Array.isArray(raw)
+      ? raw
+      : raw?.data || raw?.imoveis || raw?.results || raw?.items || [];
+
+    const premier = lista.filter(isPremier).map(sanitize);
+
+    res.json({
+      total: premier.length,
+      criterio: { bairros: PREMIER_BAIRROS.length, minVenda: PREMIER_MIN_SALE },
+      imoveis: premier,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // DESTAQUES — a seleção curada que carrega o site
