@@ -139,10 +139,17 @@ function normalize(str) {
 const PREMIER_BAIRROS_NORM = new Set(PREMIER_BAIRROS.map(normalize));
 
 // Um imóvel passa na curadoria Premier?
+// Tolerante a variações de estrutura entre CardProperty e Property.
 function isPremier(imovel) {
-  const bairro = normalize(imovel?.address?.area);
+  const area =
+    imovel?.address?.area ?? imovel?.area ?? imovel?.bairro ?? "";
+  const bairro = normalize(area);
   if (!PREMIER_BAIRROS_NORM.has(bairro)) return false; // bairro fora da lista
-  const sale = Number(imovel?.values?.sale);
+
+  // preço de venda pode vir em values.sale, sale, ou price
+  const sale = Number(
+    imovel?.values?.sale ?? imovel?.sale ?? imovel?.price ?? 0
+  );
   if (!sale || sale < PREMIER_MIN_SALE) return false; // sem venda ou abaixo de 1mi
   return true;
 }
@@ -166,33 +173,43 @@ app.get("/status", (_req, res) => res.json({ status: "online", slug: SLUG || nul
 
 // ---------------------------------------------------------------------------
 // PREMIER — o acervo curado do site (bairros nobres, venda ≥ R$ 1mi)
-// Puxa o acervo do site no NonStop e aplica o filtro de posicionamento.
+// Usa o filtro NATIVO do NonStop (areas + minVal) — mais eficiente e confiável.
 // ---------------------------------------------------------------------------
 app.get("/api/premier", async (req, res) => {
   try {
-    // Busca uma boa quantidade pra ter margem antes de filtrar.
-    const perPage = Number(req.query.perPage) || 100;
+    const perPage = Number(req.query.perPage) || 60;
     const currentPage = Number(req.query.currentPage) || 1;
-    const q = new URLSearchParams({
+
+    // A API aceita `areas` como lista de bairros e `minVal` como piso de preço.
+    // Deixa o NonStop filtrar; o proxy só sanitiza os dados sensíveis depois.
+    const params = new URLSearchParams({
       availableFor: "VENDA",
-      currentPage,
-      perPage,
-      sortBy: "sale",
-      sortOrder: -1, // mais caros primeiro
+      currentPage: String(currentPage),
+      perPage: String(perPage),
+      sortBy: "_id",      // valor válido (default do NonStop)
+      sortOrder: "-1",    // decrescente
       search: "",
-    }).toString();
+      minVal: String(PREMIER_MIN_SALE),
+      state: "SP",
+    });
+    // areas: uma entrada por bairro
+    PREMIER_BAIRROS.forEach((b) => params.append("areas", b));
 
-    const raw = await nonstop(`/imoveis/todos?${q}`, { cacheTtl: 5 * 60 * 1000 });
+    const raw = await nonstop(`/imoveis/todos?${params.toString()}`, {
+      cacheTtl: 5 * 60 * 1000,
+    });
 
-    // A resposta pode vir como array direto ou dentro de um campo (data/imoveis/results).
+    // A resposta vem como { properties: [...], total: n }
     const lista = Array.isArray(raw)
       ? raw
-      : raw?.data || raw?.imoveis || raw?.results || raw?.items || [];
+      : raw?.properties || raw?.data || raw?.imoveis || raw?.results || [];
 
+    // Rede de segurança: reaplica o filtro localmente (caso a API ignore algum param)
     const premier = lista.filter(isPremier).map(sanitize);
 
     res.json({
       total: premier.length,
+      totalApi: raw?.total ?? null,
       criterio: { bairros: PREMIER_BAIRROS.length, minVenda: PREMIER_MIN_SALE },
       imoveis: premier,
     });
