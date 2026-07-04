@@ -112,10 +112,13 @@ app.get("/api/destaques", async (req, res) => {
   try {
     // limite padrão de 12; sobrescreve com ?limit=
     const limit = Number(req.query.limit) || 12;
-    // Estratégia simples: busca imóveis à venda, ordenados, e corta no limite.
-    // Depois trocamos por um filtro de "featured" real quando definirmos o critério.
+    // Rota /imoveis/home: retorna os imóveis marcados com a tag "Home"
+    // no painel de integrações do NonStop. availableFor opcional (VENDA/LOCACAO).
+    const availableFor = req.query.availableFor
+      ? `&availablefor=${req.query.availableFor}`
+      : "";
     const data = await nonstop(
-      `/properties?transaction=VENDA&perPage=${limit}&page=1`,
+      `/imoveis/home?limit=${limit}${availableFor}`,
       { cacheTtl: 10 * 60 * 1000 } // 10 min
     );
     res.json(data);
@@ -129,8 +132,19 @@ app.get("/api/destaques", async (req, res) => {
 // ---------------------------------------------------------------------------
 app.get("/api/imoveis", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const data = await nonstop(`/properties?${qs}`, { cacheTtl: 2 * 60 * 1000 });
+    // /imoveis/todos exige availableFor, currentPage, perPage, sortBy, sortOrder e search.
+    // Preenche defaults sensatos se o front não mandar.
+    const q = {
+      availableFor: req.query.availableFor || "VENDA",
+      currentPage: req.query.currentPage || 1,
+      perPage: req.query.perPage || 12,
+      sortBy: req.query.sortBy || "_id",
+      sortOrder: req.query.sortOrder || 1,
+      search: req.query.search || "",
+      ...req.query,
+    };
+    const qs = new URLSearchParams(q).toString();
+    const data = await nonstop(`/imoveis/todos?${qs}`, { cacheTtl: 2 * 60 * 1000 });
     res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -142,7 +156,7 @@ app.get("/api/imoveis", async (req, res) => {
 // ---------------------------------------------------------------------------
 app.get("/api/imovel/:id", async (req, res) => {
   try {
-    const data = await nonstop(`/properties/${req.params.id}`, {
+    const data = await nonstop(`/imoveis/${req.params.id}`, {
       cacheTtl: 5 * 60 * 1000,
     });
     res.json(data);
@@ -154,10 +168,29 @@ app.get("/api/imovel/:id", async (req, res) => {
 // ---------------------------------------------------------------------------
 // AUTOCOMPLETE cidade / bairro
 // ---------------------------------------------------------------------------
-app.get("/api/localidades", async (req, res) => {
+app.get("/api/cidades", async (req, res) => {
   try {
     const qs = new URLSearchParams(req.query).toString();
-    const data = await nonstop(`/locations?${qs}`, { cacheTtl: 60 * 60 * 1000 });
+    const data = await nonstop(`/imoveis/cidades?${qs}`, { cacheTtl: 60 * 60 * 1000 });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/bairros", async (req, res) => {
+  try {
+    const qs = new URLSearchParams(req.query).toString();
+    const data = await nonstop(`/imoveis/bairros?${qs}`, { cacheTtl: 60 * 60 * 1000 });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/estados", async (req, res) => {
+  try {
+    const data = await nonstop(`/imoveis/estados`, { cacheTtl: 6 * 60 * 60 * 1000 });
     res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -171,24 +204,37 @@ app.get("/api/localidades", async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post("/api/lead", async (req, res) => {
   try {
-    const { name, email, phone, message, propertyId, transaction = "SELL" } = req.body || {};
+    const {
+      name,
+      email,
+      phone,
+      whatsapp,
+      message,
+      propertyId,
+      transactionType = "SELL", // SELL | RENT
+      origin = "SITE",
+    } = req.body || {};
+
     if (!name || !phone) {
       return res.status(400).json({ error: "name e phone são obrigatórios" });
     }
 
+    // listingId no formato [slug]#[base36Id]. Precisa do NONSTOP_SLUG configurado.
     const listingId =
       propertyId && SLUG ? `${SLUG}#${propertyId}` : propertyId || null;
 
     const payload = {
-      name,
-      email: email || null,
-      phone,
-      message: message || null,
-      transaction, // SELL | RENT
       listingId,
+      origin,                       // "SITE"
+      name: name || null,
+      phone: phone || null,
+      whatsapp: whatsapp || phone || null,
+      email: email || null,
+      message: message || null,
+      transactionType,              // "SELL" | "RENT"
     };
 
-    const data = await nonstop(`/leads`, { method: "POST", body: payload });
+    const data = await nonstop(`/leads/criar`, { method: "POST", body: payload });
     res.json({ ok: true, data });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -198,10 +244,23 @@ app.post("/api/lead", async (req, res) => {
 // ---------------------------------------------------------------------------
 // SITEMAP
 // ---------------------------------------------------------------------------
+// Contato (telefone, whatsapp, creci, redes) configurado no perfil NonStop
+app.get("/api/contato", async (_req, res) => {
+  try {
+    const data = await nonstop(`/site/contato`, { cacheTtl: 6 * 60 * 60 * 1000 });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/sitemap.xml", async (_req, res) => {
   try {
-    const data = await nonstop(`/site/urls`, { cacheTtl: 6 * 60 * 60 * 1000 });
-    const urls = Array.isArray(data?.urls) ? data.urls : [];
+    const slug = SLUG || "";
+    const data = await nonstop(`/site/urls?slug=${slug}`, {
+      cacheTtl: 6 * 60 * 60 * 1000,
+    });
+    const urls = Array.isArray(data) ? data : [];
     const body = urls
       .map((u) => `  <url><loc>${u}</loc></url>`)
       .join("\n");
