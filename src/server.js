@@ -159,9 +159,11 @@ function isPremier(imovel) {
 function sanitize(imovel) {
   if (!imovel || typeof imovel !== "object") return imovel;
   const clean = { ...imovel };
-  delete clean.user;        // dados do corretor
-  delete clean.brokerage;   // dados de assinatura/pagamento
-  delete clean.network;
+  delete clean.user;             // dados do corretor (rota /imovel/:id)
+  delete clean.sharedMgmtUser;   // dados do corretor (rota /todos) — gestão compartilhada
+  delete clean.brokerage;        // dados de assinatura/pagamento da imobiliária
+  delete clean.network;          // rede (RE/MAX etc.)
+  delete clean.mgmt;             // flags internas de gestão
   return clean;
 }
 
@@ -177,11 +179,11 @@ app.get("/status", (_req, res) => res.json({ status: "online", slug: SLUG || nul
 // ---------------------------------------------------------------------------
 app.get("/api/premier", async (req, res) => {
   try {
-    const perPage = Number(req.query.perPage) || 60;
+    const perPage = Number(req.query.perPage) || 200;
     const currentPage = Number(req.query.currentPage) || 1;
 
-    // A API aceita `areas` como lista de bairros e `minVal` como piso de preço.
-    // Deixa o NonStop filtrar; o proxy só sanitiza os dados sensíveis depois.
+    // A API aceita `areas` como string separada por vírgula (não repetido).
+    // Ex: areas=Moema,Pinheiros,Itaim Bibi
     const params = new URLSearchParams({
       availableFor: "VENDA",
       currentPage: String(currentPage),
@@ -191,9 +193,8 @@ app.get("/api/premier", async (req, res) => {
       search: "",
       minVal: String(PREMIER_MIN_SALE),
       state: "SP",
+      areas: PREMIER_BAIRROS.join(","),
     });
-    // areas: uma entrada por bairro
-    PREMIER_BAIRROS.forEach((b) => params.append("areas", b));
 
     const raw = await nonstop(`/imoveis/todos?${params.toString()}`, {
       cacheTtl: 5 * 60 * 1000,
